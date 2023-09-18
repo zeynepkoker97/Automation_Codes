@@ -1,0 +1,141 @@
+#!/bin/bash
+
+strand_name="nuc"
+prmtop_file="system_water"
+cluster_number=0
+
+cp ../CTC_${cluster_number}_* ../${prmtop_file}.prmtop .
+
+file_name=$(basename -s .pdb *.pdb)
+
+sed -i 's/NAME/'${file_name}'/g' count_P.tcl
+
+echo $file_name
+
+vmd -dispdev text -e count_P.tcl
+
+num_P=`cat charge.dat`  
+
+sander -O -i min2.in -o min2.out -p ${prmtop_file}.prmtop -c ${file_name}.rst -r min2.rst -ref ${file_name}.rst
+
+ambpdb -p ${prmtop_file}.prmtop < min2.rst > aftermin.pdb
+
+sed -i 's/ZEYNEP/'${file_name}'/g' savepdb.tcl
+
+vmd -dispdev text -pdb aftermin.pdb -e savepdb.tcl
+
+
+if [ -f "/proc/meminfo" ]; then
+  meminfo () {
+    __meminfo=$(awk '$3=="kB"{if ($2>1024^2){$2=$2/1024^2;$3="GB";} else if ($2>1024){$2=$2/1024;$3="MB";}} 1' /proc/meminfo)
+    echo "$__meminfo" | column -t;
+    unset __meminfo;
+  }
+  HW_TOTALRAM=$(meminfo | awk '/MemTotal/ {printf "%i", $2}')
+  
+  echo "$HW_TOTALRAM"
+  
+  HW_TOTALRAM_GB=$(meminfo | awk '/MemTotal/ {printf "%i", $2; print $3}')
+fi
+
+echo "$HW_TOTALRAM_GB"
+
+MEM_GAUSSIAN=$(( $(($HW_TOTALRAM)) - 1))
+
+echo "$MEM_GAUSSIAN"
+
+gaus_memdef_string="GAUSS_MEMDEF="$MEM_GAUSSIAN"GB"
+
+python gaus-dosya-hazirlama_eps.py "aftermin_$file_name" $num_P $MEM_GAUSSIAN
+
+g09root="/home/bnt/Programs/g09"
+
+GAUSS_SCRDIR=$PWD
+
+export g09root GAUSS_SCRDIR
+
+. $g09root/g09/bsd/g09.profile
+
+$g09root/g09/g09  $strand_name.gjf
+
+export $gaus_memdef_string
+
+$g09root/g09/formchk $strand_name.chk
+
+echo "DFT is completed, starting matrix generation..."
+
+python EnergyLevels.py
+
+mkdir 0
+cp $strand_name* 0
+rm $strand_name.log
+rm $strand_name.fchk
+
+python matrix-DFT.py
+
+$g09root/g09/g09  $strand_name.gjf
+
+python File_readMatrix.py
+
+python removefirstLine.py
+
+echo "***DONE***"
+
+
+echo "$file_name"
+
+echo "Select the contact points in selected_1, selected_1_prime, selected_2_prime, selected_2"
+
+echo "dsDNA:"
+echo "selected_1   ------------------------    selected_1_prime"
+echo "selected_2   ------------------------    selected_2_prime\n"
+
+echo "Hairpin DNA:"
+echo "selected_1   ------------------------    selected_1_prime"
+echo "                                     |"
+echo "selected_2   ------------------------    selected_2_prime\n"
+
+selection1="selected_1"
+selection2="selected_2_prime"
+
+python select_atom_contacts.py $file_name $selection1 $selection2
+
+atom_contacts=`cat contacts_atom.txt`
+
+IFS=' '
+
+read -a strarr <<< "$atom_contacts"
+
+InjectSite="${strarr[0]}"
+ExtractSite="${strarr[1]}"
+
+echo $InjectSite
+echo $ExtractSite
+
+rm Parameters.txt
+rm run1
+
+matlab -nodisplay -nosplash -nodesktop -nojvm -r 'Initial_Setup_automated('${InjectSite}','${ExtractSite}');exit;'
+
+mkdir run1
+
+mv Parameters.txt run1
+
+matlab -nodisplay -nosplash -nodesktop -nojvm -r "readMatrix;getHamiltonian(1);DNATransmission_Decoherence(1);exit;"
+
+current_path=$(pwd)
+
+output_csv_name="$(basename $(dirname $current_path)).csv"
+output_name="$(basename $(dirname $current_path))"
+
+cp save_mat_file_as_csv.m run1
+
+cp nucEL.txt nucEL_${output_name}_${selection1}_${selection2}.txt
+cp nucEL_${output_name}_${selection1}_${selection2}.txt run1
+
+cd run1
+
+matlab -nodisplay -nosplash -nodesktop -nojvm -r "save_mat_file_as_csv('${output_csv_name}');exit;"
+
+echo "--------Transmission Analysis Done--------"
+
